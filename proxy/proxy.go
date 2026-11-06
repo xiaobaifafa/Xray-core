@@ -13,7 +13,6 @@ import (
 	"math/big"
 	"runtime"
 	"strconv"
-	"time"
 
 	"github.com/pires/go-proxyproto"
 	"github.com/xtls/xray-core/app/dispatcher"
