@@ -137,6 +137,12 @@ func copyRawConnWithSplice(
 					n = burst
 				}
 				if err := limiter.WaitN(ctx, n); err != nil {
+					// A live limit update can shrink Burst between the
+					// snapshot above and WaitN's internal check. Re-split
+					// against the new burst instead of dropping the stream.
+					if ctx.Err() == nil && n > limiter.Burst() {
+						continue
+					}
 					return written, true, err
 				}
 				remaining -= n
