@@ -759,13 +759,6 @@ func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net
 				statWriter, _ = rateWriter.Writer.(*dispatcher.SizeStatWriter)
 			}
 			w, handled, err := copyRawConnWithSplice(ctx, readerConn, tc, limiter, func() {
-				if limiter == nil {
-					timer.SetTimeout(24 * time.Hour) // prevent leak, just in case
-					if inTimer != nil {
-						inTimer.SetTimeout(24 * time.Hour)
-					}
-				}
-			}, func() {
 				timer.Update()
 				if inTimer != nil {
 					inTimer.Update()
