@@ -11,7 +11,6 @@ import (
 	"crypto/rand"
 	"io"
 	"math/big"
-	"runtime"
 	"strconv"
 	"time"
 
@@ -32,6 +31,7 @@ import (
 	"github.com/xtls/xray-core/transport/internet/reality"
 	"github.com/xtls/xray-core/transport/internet/stat"
 	"github.com/xtls/xray-core/transport/internet/tls"
+	"golang.org/x/time/rate"
 )
 
 var (
@@ -751,13 +751,18 @@ func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net
 		}
 		if splice {
 			errors.LogDebug(ctx, "CopyRawConn splice")
+			var limiter *rate.Limiter
 			statWriter, _ := writer.(*dispatcher.SizeStatWriter)
-			//runtime.Gosched() // necessary
-			timer.SetTimeout(24 * time.Hour) // prevent leak, just in case
-			if inTimer != nil {
-				inTimer.SetTimeout(24 * time.Hour)
+			if rateWriter, ok := writer.(*dispatcher.RateLimitWriter); ok {
+				limiter = rateWriter.Limiter
+				statWriter, _ = rateWriter.Writer.(*dispatcher.SizeStatWriter)
 			}
-			w, err := tc.ReadFrom(readerConn)
+			w, handled, err := copyRawConnWithSplice(ctx, readerConn, tc, limiter, func() {
+				timer.SetTimeout(24 * time.Hour) // prevent leak, just in case
+				if inTimer != nil {
+					inTimer.SetTimeout(24 * time.Hour)
+				}
+			})
 			if readCounter != nil {
 				readCounter.Add(w) // outbound stats
 			}
@@ -767,10 +772,15 @@ func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net
 			if statWriter != nil {
 				statWriter.Counter.Add(w) // user stats
 			}
-			if err != nil && errors.Cause(err) != io.EOF {
-				return err
+			if handled {
+				if err != nil && errors.Cause(err) != io.EOF {
+					return err
+				}
+				return nil
 			}
-			return nil
+			// The source socket does not support splice. No bytes from the
+			// unsupported attempt were consumed, so continue with the buffered
+			// reader (which still starts at the current socket position).
 		}
 		buffer, err := reader.ReadMultiBuffer()
 		if !buffer.IsEmpty() {
