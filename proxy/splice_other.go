@@ -15,6 +15,7 @@ func copyRawConnWithSplice(
 	_ net.Conn,
 	_ *rate.Limiter,
 	_ func(),
+	_ func(),
 ) (int64, bool, error) {
 	return 0, false, nil
 }
