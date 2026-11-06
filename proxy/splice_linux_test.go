@@ -9,6 +9,7 @@ import (
 	"io"
 	stdnet "net"
 	"testing"
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -145,5 +146,93 @@ func TestCopyRawConnWithSpliceHandlesBackpressure(t *testing.T) {
 	_, received := runRawSpliceTest(t, payload, nil, true)
 	if !bytes.Equal(received, payload) {
 		t.Fatalf("payload mismatch under backpressure: received %d bytes, want %d", len(received), len(payload))
+	}
+}
+
+func TestCopyRawConnWithSpliceSharesLimiterAcrossStreams(t *testing.T) {
+	limiter := rate.NewLimiter(rate.Limit(1<<20), 1<<20)
+	payloads := [2][]byte{make([]byte, 1<<20), make([]byte, 1<<20)}
+	for i := range payloads {
+		if _, err := rand.Read(payloads[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	type stream struct {
+		sourceClient *stdnet.TCPConn
+		sourceServer *stdnet.TCPConn
+		destClient   *stdnet.TCPConn
+		destServer   *stdnet.TCPConn
+	}
+	streams := [2]stream{}
+	for i := range streams {
+		streams[i].sourceClient, streams[i].sourceServer = newRawSpliceTCPPair(t)
+		streams[i].destClient, streams[i].destServer = newRawSpliceTCPPair(t)
+		defer streams[i].sourceClient.Close()
+		defer streams[i].sourceServer.Close()
+		defer streams[i].destClient.Close()
+		defer streams[i].destServer.Close()
+	}
+
+	writeErrors := make(chan error, len(streams))
+	readResults := make(chan []byte, len(streams))
+	for i := range streams {
+		s := streams[i]
+		payload := payloads[i]
+		go func() {
+			_, err := io.Copy(s.sourceClient, bytes.NewReader(payload))
+			if closeErr := s.sourceClient.CloseWrite(); err == nil {
+				err = closeErr
+			}
+			writeErrors <- err
+		}()
+		go func() {
+			data, err := io.ReadAll(s.destClient)
+			if err != nil {
+				t.Errorf("destination read: %v", err)
+			}
+			readResults <- data
+		}()
+	}
+
+	start := time.Now()
+	var wg sync.WaitGroup
+	copyErrors := make(chan error, len(streams))
+	for i := range streams {
+		wg.Add(1)
+		s := streams[i]
+		go func() {
+			defer wg.Done()
+			written, handled, err := copyRawConnWithSplice(context.Background(), s.sourceServer, s.destServer, limiter, nil)
+			if err == nil && !handled {
+				err = io.ErrUnexpectedEOF
+			}
+			if err == nil && written != 1<<20 {
+				err = io.ErrShortWrite
+			}
+			if err == nil {
+				err = s.destServer.CloseWrite()
+			}
+			copyErrors <- err
+		}()
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+	for range streams {
+		if err := <-copyErrors; err != nil {
+			t.Fatal(err)
+		}
+		if err := <-writeErrors; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range streams {
+		received := <-readResults
+		if !bytes.Equal(received, payloads[i]) {
+			t.Fatalf("stream %d payload mismatch: received %d bytes, want %d", i, len(received), len(payloads[i]))
+		}
+	}
+	if elapsed < 700*time.Millisecond {
+		t.Fatalf("two streams bypassed their shared limiter: 2 MiB completed in %s", elapsed)
 	}
 }
