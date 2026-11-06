@@ -12,6 +12,7 @@ import (
 	"io"
 	"math/big"
 	"runtime"
+	"time"
 	"strconv"
 
 	"github.com/pires/go-proxyproto"
