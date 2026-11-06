@@ -239,3 +239,94 @@ func TestCopyRawConnWithSpliceSharesLimiterAcrossStreams(t *testing.T) {
 		t.Fatalf("two streams bypassed their shared limiter: 2 MiB completed in %s", elapsed)
 	}
 }
+
+func TestCopyRawConnWithSpliceHandsOffAfterLimitRemoval(t *testing.T) {
+	payload := make([]byte, 4<<20)
+	if _, err := rand.Read(payload); err != nil {
+		t.Fatal(err)
+	}
+	sourceClient, sourceServer := newRawSpliceTCPPair(t)
+	destClient, destServer := newRawSpliceTCPPair(t)
+	defer sourceClient.Close()
+	defer sourceServer.Close()
+	defer destClient.Close()
+	defer destServer.Close()
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(sourceClient, bytes.NewReader(payload))
+		if closeErr := sourceClient.CloseWrite(); err == nil {
+			err = closeErr
+		}
+		writeDone <- err
+	}()
+
+	readDone := make(chan []byte, 1)
+	go func() {
+		data, err := io.ReadAll(destClient)
+		if err != nil {
+			t.Errorf("destination read: %v", err)
+		}
+		readDone <- data
+	}()
+
+	limiter := rate.NewLimiter(rate.Limit(1<<20), 1<<20)
+	firstRead := make(chan struct{})
+	continueCopy := make(chan struct{})
+	var once sync.Once
+	onActivity := func() {
+		once.Do(func() {
+			close(firstRead)
+			<-continueCopy
+		})
+	}
+
+	type result struct {
+		written int64
+		handled bool
+		err     error
+	}
+	copyDone := make(chan result, 1)
+	go func() {
+		written, handled, err := copyRawConnWithSplice(context.Background(), sourceServer, destServer, limiter, onActivity)
+		copyDone <- result{written: written, handled: handled, err: err}
+	}()
+
+	// Pause immediately after the first source chunk enters the pipe. Removing
+	// the limit here must let that chunk drain before the helper hands off.
+	<-firstRead
+	limiter.SetLimit(rate.Limit(1e30))
+	limiter.SetBurst(int(^uint(0) >> 1))
+	close(continueCopy)
+
+	res := <-copyDone
+	if res.err != nil {
+		t.Fatalf("copyRawConnWithSplice: %v", res.err)
+	}
+	if res.handled {
+		t.Fatal("expected splice helper to hand off after limit removal")
+	}
+	if res.written <= 0 || res.written >= int64(len(payload)) {
+		t.Fatalf("unexpected bytes before handoff: %d of %d", res.written, len(payload))
+	}
+
+	// The helper must return only with an empty pipe. The native TCP ReadFrom
+	// path can then continue from the exact next byte without loss or reordering.
+	remaining, err := destServer.ReadFrom(sourceServer)
+	if err != nil {
+		t.Fatalf("native ReadFrom after handoff: %v", err)
+	}
+	if res.written+remaining != int64(len(payload)) {
+		t.Fatalf("total forwarded = %d, want %d", res.written+remaining, len(payload))
+	}
+	if err := destServer.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatalf("source write: %v", err)
+	}
+	received := <-readDone
+	if !bytes.Equal(received, payload) {
+		t.Fatalf("payload mismatch after handoff: received %d bytes, want %d", len(received), len(payload))
+	}
+}
