@@ -13,7 +13,7 @@ import (
 	"golang.org/x/time/rate"
 )
 
-const maxRawSpliceChunk = 1 << 20
+const maxRawSpliceChunk = 256 << 10
 
 // copyRawConnWithSplice forwards a raw stream through a kernel pipe. When a
 // limiter is present, it charges each chunk before the pipe is drained to the
@@ -55,15 +55,27 @@ func copyRawConnWithSplice(
 	defer unix.Close(pipeFD[0])
 	defer unix.Close(pipeFD[1])
 
-	// A larger pipe reduces syscall frequency. This is an optimization only;
-	// the loop remains correct if the kernel keeps the default pipe capacity.
-	_, _ = unix.FcntlInt(uintptr(pipeFD[1]), unix.F_SETPIPE_SZ, maxRawSpliceChunk)
+	// Size the pipe for the current chunk, and grow it only when a live
+	// bandwidth-limit increase requires larger chunks. The default pipe size
+	// remains a safe fallback if the kernel refuses the resize.
+	chunkSize := rawSpliceChunkSize(limiter)
+	pipeSize := chunkSize
+	if actualSize, resizeErr := unix.FcntlInt(uintptr(pipeFD[1]), unix.F_SETPIPE_SZ, chunkSize); resizeErr == nil {
+		pipeSize = actualSize
+	}
 
 	started := false
 	for {
 		// Recalculate the chunk size so live limit changes can also increase
 		// the splice chunk and avoid permanently paying small-chunk overhead.
-		chunkSize := rawSpliceChunkSize(limiter)
+		chunkSize = rawSpliceChunkSize(limiter)
+		if chunkSize > pipeSize {
+			if actualSize, resizeErr := unix.FcntlInt(uintptr(pipeFD[1]), unix.F_SETPIPE_SZ, chunkSize); resizeErr == nil {
+				pipeSize = actualSize
+			} else {
+				pipeSize = chunkSize
+			}
+		}
 		var inPipe int64
 		var eof bool
 		var sourceErr error
