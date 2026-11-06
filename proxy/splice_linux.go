@@ -143,40 +143,36 @@ func copyRawConnWithSplice(
 		}
 
 		// Do not read another source chunk until every byte in the pipe has
-		// reached the destination. This makes handoff and backpressure safe.
-		for inPipe > 0 {
-			var nWritten int64
-			var destinationErr error
-
-			err := dstRaw.Write(func(fd uintptr) bool {
-				for {
-					n, spliceErr := unix.Splice(pipeFD[0], nil, int(fd), nil, int(inPipe), unix.SPLICE_F_NONBLOCK)
-					if spliceErr == unix.EINTR {
-						continue
-					}
-					if spliceErr == unix.EAGAIN || spliceErr == unix.EWOULDBLOCK {
-						return false
-					}
-					if spliceErr != nil {
-						destinationErr = spliceErr
-						return true
-					}
-					if n == 0 {
-						destinationErr = io.ErrShortWrite
-						return true
-					}
-					nWritten = n
+		// reached the destination. Keep the destination write lock while
+		// pumping partial writes, just like Go's standard splice path.
+		var destinationErr error
+		err = dstRaw.Write(func(fd uintptr) bool {
+			for inPipe > 0 {
+				n, spliceErr := unix.Splice(pipeFD[0], nil, int(fd), nil, int(inPipe), unix.SPLICE_F_NONBLOCK)
+				if spliceErr == unix.EINTR {
+					continue
+				}
+				if spliceErr == unix.EAGAIN || spliceErr == unix.EWOULDBLOCK {
+					return false
+				}
+				if spliceErr != nil {
+					destinationErr = spliceErr
 					return true
 				}
-			})
-			if err != nil {
-				return written, true, err
+				if n == 0 {
+					destinationErr = io.ErrShortWrite
+					return true
+				}
+				inPipe -= n
+				written += n
 			}
-			if destinationErr != nil {
-				return written, true, destinationErr
-			}
-			inPipe -= nWritten
-			written += nWritten
+			return true
+		})
+		if err != nil {
+			return written, true, err
+		}
+		if destinationErr != nil {
+			return written, true, destinationErr
 		}
 	}
 }
