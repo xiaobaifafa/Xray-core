@@ -24,7 +24,6 @@ func copyRawConnWithSplice(
 	readerConn net.Conn,
 	writerConn net.Conn,
 	limiter *rate.Limiter,
-	onStart func(),
 	onActivity func(),
 ) (written int64, handled bool, err error) {
 	src, ok := readerConn.(syscall.Conn)
@@ -65,7 +64,6 @@ func copyRawConnWithSplice(
 		pipeSize = actualSize
 	}
 
-	started := false
 	for {
 		// Recalculate the chunk size so live limit changes can also increase
 		// the splice chunk and avoid permanently paying small-chunk overhead.
@@ -118,11 +116,8 @@ func copyRawConnWithSplice(
 			return written, true, nil
 		}
 
-		if !started {
-			started = true
-			if onStart != nil {
-				onStart()
-			}
+		if onActivity != nil {
+			onActivity()
 		}
 
 		if limiter != nil {
