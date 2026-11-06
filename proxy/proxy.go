@@ -793,6 +793,20 @@ func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net
 				}
 			})
 			recordSpliceStats(w)
+			if !handled && limiter.Burst() == int(^uint(0)>>1) {
+				// The custom pipe is empty at this return point. Resume with
+				// the exact native TCP splice path after the user limit is removed.
+				timer.SetTimeout(24 * time.Hour)
+				if inTimer != nil {
+					inTimer.SetTimeout(24 * time.Hour)
+				}
+				w, err := tc.ReadFrom(readerConn)
+				recordSpliceStats(w)
+				if err != nil && errors.Cause(err) != io.EOF {
+					return err
+				}
+				return nil
+			}
 			if handled {
 				if err != nil && errors.Cause(err) != io.EOF {
 					return err
