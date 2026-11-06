@@ -757,21 +757,42 @@ func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net
 				limiter = rateWriter.Limiter
 				statWriter, _ = rateWriter.Writer.(*dispatcher.SizeStatWriter)
 			}
+			// Xboard marks a removed limit with an effectively unlimited
+			// limiter and MaxInt burst. New connections can therefore keep
+			// the exact original ReadFrom fast path.
+			if limiter != nil && limiter.Burst() == int(^uint(0)>>1) {
+				limiter = nil
+			}
+			recordSpliceStats := func(w int64) {
+				if readCounter != nil {
+					readCounter.Add(w) // outbound stats
+				}
+				if writeCounter != nil {
+					writeCounter.Add(w) // inbound stats
+				}
+				if statWriter != nil {
+					statWriter.Counter.Add(w) // user stats
+				}
+			}
+			if limiter == nil {
+				timer.SetTimeout(24 * time.Hour) // original unlimited splice behavior
+				if inTimer != nil {
+					inTimer.SetTimeout(24 * time.Hour)
+				}
+				w, err := tc.ReadFrom(readerConn)
+				recordSpliceStats(w)
+				if err != nil && errors.Cause(err) != io.EOF {
+					return err
+				}
+				return nil
+			}
 			w, handled, err := copyRawConnWithSplice(ctx, readerConn, tc, limiter, func() {
 				timer.Update()
 				if inTimer != nil {
 					inTimer.Update()
 				}
 			})
-			if readCounter != nil {
-				readCounter.Add(w) // outbound stats
-			}
-			if writeCounter != nil {
-				writeCounter.Add(w) // inbound stats
-			}
-			if statWriter != nil {
-				statWriter.Counter.Add(w) // user stats
-			}
+			recordSpliceStats(w)
 			if handled {
 				if err != nil && errors.Cause(err) != io.EOF {
 					return err
