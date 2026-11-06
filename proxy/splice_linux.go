@@ -25,6 +25,7 @@ func copyRawConnWithSplice(
 	writerConn net.Conn,
 	limiter *rate.Limiter,
 	onStart func(),
+	onActivity func(),
 ) (written int64, handled bool, err error) {
 	src, ok := readerConn.(syscall.Conn)
 	if !ok {
@@ -173,6 +174,9 @@ func copyRawConnWithSplice(
 		}
 		if destinationErr != nil {
 			return written, true, destinationErr
+		}
+		if onActivity != nil {
+			onActivity()
 		}
 	}
 }
