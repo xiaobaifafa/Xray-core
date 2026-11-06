@@ -65,6 +65,12 @@ func copyRawConnWithSplice(
 	}
 
 	for {
+		// A removed limit is represented by MaxInt burst in Xboard. The pipe
+		// is empty at this point, so the caller can safely hand the socket back
+		// to Go's original TCPConn.ReadFrom implementation.
+		if limiter != nil && limiter.Burst() == int(^uint(0)>>1) {
+			return written, false, nil
+		}
 		// Recalculate the chunk size so live limit changes can also increase
 		// the splice chunk and avoid permanently paying small-chunk overhead.
 		chunkSize = rawSpliceChunkSize(limiter)
@@ -120,7 +126,7 @@ func copyRawConnWithSplice(
 			onActivity()
 		}
 
-		if limiter != nil {
+		if limiter != nil && limiter.Burst() != int(^uint(0)>>1) {
 			remaining := int(inPipe)
 			for remaining > 0 {
 				burst := limiter.Burst()
