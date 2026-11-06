@@ -89,7 +89,7 @@ func runRawSpliceTest(t *testing.T, payload []byte, limiter *rate.Limiter, slowR
 	}()
 
 	start := time.Now()
-	written, handled, err := copyRawConnWithSplice(context.Background(), sourceServer, destServer, limiter, nil, nil)
+	written, handled, err := copyRawConnWithSplice(context.Background(), sourceServer, destServer, limiter, nil)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("copyRawConnWithSplice: %v", err)
@@ -206,7 +206,7 @@ func TestCopyRawConnWithSpliceSharesLimiterAcrossStreams(t *testing.T) {
 		s := streams[i]
 		go func() {
 			defer wg.Done()
-			written, handled, err := copyRawConnWithSplice(context.Background(), s.sourceServer, s.destServer, limiter, nil, nil)
+			written, handled, err := copyRawConnWithSplice(context.Background(), s.sourceServer, s.destServer, limiter, nil)
 			if err == nil && !handled {
 				err = io.ErrUnexpectedEOF
 			}
