@@ -44,7 +44,6 @@ func copyRawConnWithSplice(
 		return 0, false, err
 	}
 
-	chunkSize := rawSpliceChunkSize(limiter)
 	if limiter != nil && limiter.Burst() <= 0 {
 		return 0, true, io.ErrShortWrite
 	}
@@ -58,10 +57,13 @@ func copyRawConnWithSplice(
 
 	// A larger pipe reduces syscall frequency. This is an optimization only;
 	// the loop remains correct if the kernel keeps the default pipe capacity.
-	_, _ = unix.FcntlInt(uintptr(pipeFD[1]), unix.F_SETPIPE_SZ, chunkSize)
+	_, _ = unix.FcntlInt(uintptr(pipeFD[1]), unix.F_SETPIPE_SZ, maxRawSpliceChunk)
 
 	started := false
 	for {
+		// Recalculate the chunk size so live limit changes can also increase
+		// the splice chunk and avoid permanently paying small-chunk overhead.
+		chunkSize := rawSpliceChunkSize(limiter)
 		var inPipe int64
 		var eof bool
 		var sourceErr error
