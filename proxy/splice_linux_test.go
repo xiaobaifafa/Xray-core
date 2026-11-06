@@ -175,7 +175,7 @@ func TestCopyRawConnWithSpliceSharesLimiterAcrossStreams(t *testing.T) {
 	}
 
 	writeErrors := make(chan error, len(streams))
-	readResults := make(chan []byte, len(streams))
+	readResults := make(chan struct { index int; data []byte }, len(streams))
 	for i := range streams {
 		s := streams[i]
 		payload := payloads[i]
@@ -186,13 +186,16 @@ func TestCopyRawConnWithSpliceSharesLimiterAcrossStreams(t *testing.T) {
 			}
 			writeErrors <- err
 		}()
-		go func() {
+		go func(index int) {
 			data, err := io.ReadAll(s.destClient)
 			if err != nil {
 				t.Errorf("destination read: %v", err)
 			}
-			readResults <- data
-		}()
+			readResults <- struct {
+				index int
+				data  []byte
+			}{index: index, data: data}
+		}(i)
 	}
 
 	start := time.Now()
@@ -226,10 +229,10 @@ func TestCopyRawConnWithSpliceSharesLimiterAcrossStreams(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for i := range streams {
-		received := <-readResults
-		if !bytes.Equal(received, payloads[i]) {
-			t.Fatalf("stream %d payload mismatch: received %d bytes, want %d", i, len(received), len(payloads[i]))
+	for range streams {
+		result := <-readResults
+		if !bytes.Equal(result.data, payloads[result.index]) {
+			t.Fatalf("stream %d payload mismatch: received %d bytes, want %d", result.index, len(result.data), len(payloads[result.index]))
 		}
 	}
 	if elapsed < 700*time.Millisecond {
